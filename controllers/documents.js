@@ -1,12 +1,4 @@
 const db = require('../config/db');
-const path = require('path');
-const fs = require('fs');
-
-// Create uploads directory if it doesn't exist
-const uploadsDir = path.join('/tmp', 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
 
 exports.getAll = async (req, res) => {
   try {
@@ -133,85 +125,29 @@ exports.upload = async (req, res) => {
   }
 };
 
-exports.uploadLegacy = async (req, res) => {
-  try {
-    console.log('Upload endpoint called');
-    console.log('Files received:', req.files);
-    
-    if (!req.files || !req.files.document) {
-      console.error('No file uploaded');
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    const file = req.files.document;
-    const { application_id, customer_id, document_type, metadata } = req.body;
-    
-    console.log('File details:', { name: file.name, size: file.size, mimetype: file.mimetype });
-    console.log('Form data:', { application_id, customer_id, document_type });
-
-    const timestamp = Date.now();
-    const storedFilename = `${timestamp}-${file.name}`;
-    const uploadPath = path.join(uploadsDir, storedFilename);
-
-    await file.mv(uploadPath);
-    console.log('File saved to:', uploadPath);
-
-    let metadataObj = {};
-    if (metadata && typeof metadata === 'string') {
-      try {
-        metadataObj = JSON.parse(metadata);
-      } catch (e) {
-        metadataObj = { original_filename: file.name };
-      }
-    }
-
-    const cols = ['application_id', 'document_type', 'original_filename', 'stored_filename', 'file_path', 'file_size_kb', 'mime_type'];
-    const values = [
-      application_id || null,
-      document_type || 'LoanApplicationDocument',
-      metadataObj.original_filename || file.name,
-      storedFilename,
-      uploadPath,
-      Math.round(file.size / 1024),
-      file.mimetype
-    ];
-
-    const placeholders = values.map(() => '?').join(',');
-    const result = await db.query(
-      `INSERT INTO documents (${cols.join(',')}) VALUES (${placeholders})`,
-      values
-    );
-
-    const [newRow] = await db.query('SELECT * FROM documents WHERE id = ?', [result.insertId]);
-
-    console.log('Document record created:', newRow);
-
-    res.status(201).json({
-      message: 'File uploaded successfully',
-      data: newRow
-    });
-  } catch (err) {
-    console.error('Upload error:', err);
-    res.status(500).json({ error: err.message });
-  }
-};
-
 exports.remove = async (req, res) => { 
   try { 
     const { id } = req.params; 
     
+    // Get the document from the database to find the public_id
     const [doc] = await db.query('SELECT stored_filename FROM documents WHERE id = ?', [id]);
     
     if (doc && doc.stored_filename) {
-      const filePath = path.join(uploadsDir, doc.stored_filename);
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-      }
+      const public_id = doc.stored_filename;
+      // The public_id from multer-storage-cloudinary includes the folder and filename.
+      // For the destroy method, we need the public_id without the file extension.
+      const publicIdForDestroy = public_id.substring(0, public_id.lastIndexOf('.'));
+      
+      // Delete from Cloudinary
+      await cloudinary.uploader.destroy(publicIdForDestroy);
     }
     
+    // Finally, delete the record from the database
     await db.query('DELETE FROM documents WHERE id = ?', [id]); 
+    
     res.status(204).end(); 
   } catch (err) { 
-    res.status(500).json({ error: err.message }); 
+    console.error("Error during document deletion:", err);
+    res.status(500).json({ error: 'Failed to delete document' }); 
   } 
 };
